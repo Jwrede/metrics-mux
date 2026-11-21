@@ -103,16 +103,33 @@ routes:
   selectorKeys: [scaledobject.keda.sh/name, scaledjob.keda.sh/name]
 CFG
 go run ./cmd/metrics-mux explain --config /tmp/mux-config.yaml -n e2e --query | tee /tmp/explain.txt
-grep -E 'keda-hpa-worker .* keda +route 0 \(selectorKeys\) +[0-9]' /tmp/explain.txt || fail "explain: KEDA row"
-grep -E '^e2e +web +prom_up .* \? +discovery .* 1$' /tmp/explain.txt || fail "explain: prometheus row"
+grep -qE 'keda-hpa-worker .* keda +route 0 \(selectorKeys\) +[0-9]' /tmp/explain.txt || fail "explain: KEDA row"
+grep -qE '^e2e +web +prom_up .* \? +discovery .* 1$' /tmp/explain.txt || fail "explain: prometheus row"
 
-log "authorization is enforced by metrics-mux"
+log "unprivileged callers get Forbidden (through the kube-apiserver)"
 kubectl -n e2e create serviceaccount nobody --dry-run=client -o yaml | kubectl apply -f -
 if out=$(kubectl get --raw /apis/external.metrics.k8s.io/v1beta1/namespaces/e2e/prom_up --as=system:serviceaccount:e2e:nobody 2>&1); then
   fail "unprivileged ServiceAccount could read metrics: $out"
 fi
 echo "$out" | grep -qi forbidden || fail "expected Forbidden, got: $out"
 echo "ok: $out"
+
+log "metrics-mux authenticates and authorizes direct callers itself"
+kubectl -n e2e create serviceaccount reader --dry-run=client -o yaml | kubectl apply -f -
+kubectl create clusterrolebinding e2e-reader --clusterrole=metrics-mux-external-metrics-reader \
+  --serviceaccount=e2e:reader --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n metrics-mux port-forward svc/metrics-mux 18443:443 >/tmp/pf.log 2>&1 &
+PF=$!
+wait_for 30 "port-forward to metrics-mux" curl -sk -o /dev/null https://127.0.0.1:18443/readyz
+url=https://127.0.0.1:18443/apis/external.metrics.k8s.io/v1beta1/namespaces/e2e/prom_up
+code() { curl -sk -o /tmp/body -w '%{http_code}' ${1:+-H "Authorization: Bearer $1"} "$url"; }
+c=$(code "$(kubectl -n e2e create token nobody)"); echo "nobody: HTTP $c $(head -c 200 /tmp/body)"
+[ "$c" = 403 ] || fail "direct call without RBAC: want 403, got $c"
+c=$(code ""); echo "anonymous: HTTP $c"
+[ "$c" = 401 ] || [ "$c" = 403 ] || fail "anonymous direct call: want 401/403, got $c"
+c=$(code "$(kubectl -n e2e create token reader)"); echo "reader: HTTP $c $(head -c 200 /tmp/body)"
+{ [ "$c" = 200 ] && grep -q '"value":"1"' /tmp/body; } || fail "direct call with RBAC: got $c"
+kill $PF
 
 log "an adapter re-registering the APIService is undone"
 kubectl patch apiservice v1beta1.external.metrics.k8s.io --type=merge \

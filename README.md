@@ -48,8 +48,10 @@ of the first adapter stop scaling.
 
 - Serves `external.metrics.k8s.io/v1beta1` with the standard aggregated API
   server machinery (sigs.k8s.io/custom-metrics-apiserver): delegated
-  authentication and authorization, so a caller without RBAC on external
-  metrics gets `Forbidden` from metrics-mux before anything is forwarded.
+  authentication and authorization (TokenReview, SubjectAccessReview), so a
+  caller without RBAC on external metrics gets `Forbidden` before anything is
+  forwarded, also when it bypasses the kube-apiserver and calls the Service
+  directly.
 - Routes each request, in this order:
   1. **routes**: the first matching rule by metric name regex, label selector
      key (KEDA always selects on `scaledobject.keda.sh/name`) and namespace,
@@ -135,7 +137,25 @@ fallback: prometheus           # optional
 prometheus-adapter metric):
 
 ```
-EXPLAIN_OUTPUT
+$ metrics-mux explain --config config.yaml -n e2e --query
+NAMESPACE  HPA              METRIC           SELECTOR                          BACKEND  REASON                               VALUE
+e2e        keda-hpa-worker  s0-workload-e2e  scaledobject.keda.sh/name=worker  keda     route 0 (selectorKeys)               1
+e2e        web              prom_up          -                                 ?        discovery (decided at request time)  1
+```
+
+`explain` evaluates only the static routes. Which backend a discovery route
+picks is decided per request and is visible in the metrics-mux log (`--v=2`):
+
+```
+external metric e2e/s0-workload-e2e selector="scaledobject.keda.sh/name=worker" -> keda as "s0-workload-e2e" [route 0 (selectorKeys)] in 4ms err=<nil>
+external metric e2e/prom_up selector="" -> prometheus as "prom_up" [discovery] in 2ms err=<nil>
+```
+
+When metrics-mux starts in a cluster where prometheus-adapter owns the APIService:
+
+```
+issued serving certificate for [metrics-mux.metrics-mux.svc metrics-mux.metrics-mux.svc.cluster.local] into secret metrics-mux/metrics-mux-serving
+updated APIService v1beta1.external.metrics.k8s.io (was monitoring/prometheus-adapter:443)
 ```
 
 Unit test output for the routing table, from `internal/explain`:
@@ -158,9 +178,12 @@ shop       web              prom-http_rps  -                                 pro
   with `registerAPIService=false`, metrics-mux. It checks that metrics-mux takes
   over the APIService, that it becomes Available, that both an HPA on a
   prometheus-adapter metric and a KEDA ScaledObject's HPA are `ScalingActive`
-  with current values, that an unprivileged ServiceAccount gets `Forbidden`,
-  that `explain --query` reports both routes, and that a re-registration by
-  the adapter is undone.
+  with current values, that `explain --query` reports both routes, that an
+  unprivileged ServiceAccount gets `Forbidden` both through the kube-apiserver
+  and when calling metrics-mux directly (anonymous: 401/403, with RBAC: 200),
+  and that a re-registration of the APIService by the adapter is undone.
+  Versions in the last run: kind node v1.35.0, KEDA chart 2.21.1,
+  prometheus-adapter chart 5.4.2 (adapter v0.12.0), Prometheus v3.5.0.
 
 ## Limitations
 
