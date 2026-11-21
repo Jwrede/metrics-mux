@@ -1,0 +1,12 @@
+prometheus:
+  url: http://prometheus.monitoring.svc
+  port: 9090
+rules:
+  default: false
+  external:
+  - seriesQuery: 'up{job="prometheus"}'
+    resources:
+      namespaced: false
+    name:
+      as: prom_up
+    metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>})'
