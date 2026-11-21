@@ -128,7 +128,7 @@ c=$(code "$(kubectl -n e2e create token nobody)"); echo "nobody: HTTP $c $(head 
 c=$(code ""); echo "anonymous: HTTP $c"
 [ "$c" = 401 ] || [ "$c" = 403 ] || fail "anonymous direct call: want 401/403, got $c"
 c=$(code "$(kubectl -n e2e create token reader)"); echo "reader: HTTP $c $(head -c 200 /tmp/body)"
-{ [ "$c" = 200 ] && grep -q '"value":"1"' /tmp/body; } || fail "direct call with RBAC: got $c"
+{ [ "$c" = 200 ] && grep -qE '"value": *"1"' /tmp/body; } || fail "direct call with RBAC: got $c"
 kill $PF
 
 log "an adapter re-registering the APIService is undone"
